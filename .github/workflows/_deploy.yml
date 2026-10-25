@@ -1,0 +1,63 @@
+# Reusable workflow: build both images, deploy a canary revision, run the eval gate, shift traffic.
+name: _deploy
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      canary_percent:
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      REG: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ vars.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push images (tagged with the commit)
+        run: |
+          docker build -f Dockerfile        -t $REG/api:${{ github.sha }}    .
+          docker build -f Dockerfile.ingest -t $REG/ingest:${{ github.sha }} .
+          docker push $REG/api:${{ github.sha }}
+          docker push $REG/ingest:${{ github.sha }}
+
+      - name: Deploy API as a canary revision (no traffic)
+        run: |
+          gcloud run deploy agent-api --image $REG/api:${{ github.sha }} --region ${{ vars.REGION }} \
+            --no-traffic --tag canary --quiet
+
+      - name: Update ingestion service and batch job
+        run: |
+          gcloud run deploy rag-ingestion --image $REG/ingest:${{ github.sha }} --region ${{ vars.REGION }} --quiet
+          gcloud run jobs update rag-batch-ingestion --image $REG/ingest:${{ github.sha }} --region ${{ vars.REGION }} --quiet
+
+      - name: Eval gate against the canary URL
+        env:
+          EVAL_TOKENS: ${{ secrets.EVAL_TOKENS }}
+        run: |
+          URL=$(gcloud run services describe agent-api --region ${{ vars.REGION }} --format=json \
+                | jq -r '.status.traffic[] | select(.tag=="canary") | .url')
+          export GCP_ID_TOKEN=$(gcloud auth print-identity-token --audiences="$URL" 2>/dev/null || true)
+          echo "$EVAL_TOKENS" > evals/test_tokens.json
+          pip install -q httpx pyyaml
+          python evals/run_eval.py "$URL"
+
+      - name: Shift traffic to the canary
+        run: |
+          gcloud run services update-traffic agent-api --region ${{ vars.REGION }} \
+            --to-tags canary=${{ inputs.canary_percent }}

@@ -1,0 +1,50 @@
+name: deploy-app
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "Dockerfile*", "requirements*.txt", "evals/**", ".github/workflows/_deploy.yml", ".github/workflows/deploy-app.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest tests/unit -q
+
+  dev:
+    needs: test
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: dev
+      canary_percent: 100
+    secrets: inherit
+
+  prod:
+    needs: dev
+    uses: ./.github/workflows/_deploy.yml   # the "prod" environment requires a reviewer to approve
+    with:
+      environment: prod
+      canary_percent: 10
+    secrets: inherit
+
+  promote-prod:
+    needs: prod
+    runs-on: ubuntu-latest
+    environment: prod-promote               # second approval, after watching the 10% canary
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud run services update-traffic agent-api --region ${{ vars.REGION }} --to-latest

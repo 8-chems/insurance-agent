@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+pydantic-settings
+google-genai
+google-cloud-bigquery
+google-cloud-storage
+google-cloud-firestore
+google-cloud-documentai
+numpy
+google-cloud-spanner
+sentence-transformers
+transformers

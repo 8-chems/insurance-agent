@@ -1,0 +1,4 @@
+contains_ok:  {min: 0.95}
+forbidden_ok: {min: 1.00}
+abstain_ok:   {min: 0.95}
+cited_ok:     {min: 0.95}

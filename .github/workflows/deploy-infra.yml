@@ -1,0 +1,46 @@
+name: deploy-infra
+on:
+  push:
+    branches: [main]
+    paths: ["infra/terraform/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency: terraform-dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.TF_SA }}
+      - uses: hashicorp/setup-terraform@v3
+      - run: |
+          cd infra/terraform/envs/dev
+          terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="prefix=agent/dev"
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false tfplan
+
+  prod:
+    needs: dev
+    runs-on: ubuntu-latest
+    environment: prod                       # reviewer approves before anything touches production
+    concurrency: terraform-prod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.TF_SA }}
+      - uses: hashicorp/setup-terraform@v3
+      - run: |
+          cd infra/terraform/envs/prod
+          terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="prefix=agent/prod"
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false tfplan

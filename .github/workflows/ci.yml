@@ -1,0 +1,60 @@
+name: ci
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check src tests
+      - run: pytest tests/unit -q
+
+  terraform-static:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [dev, prod]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: terraform -chdir=infra/terraform/envs/${{ matrix.env }} init -backend=false
+      - run: terraform -chdir=infra/terraform/envs/${{ matrix.env }} validate
+
+  plan-dev:
+    needs: [test, terraform-static]
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.TF_SA }}
+      - uses: hashicorp/setup-terraform@v3
+      - name: Plan
+        run: |
+          cd infra/terraform/envs/dev
+          terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="prefix=agent/dev"
+          terraform plan -input=false -no-color > "$GITHUB_WORKSPACE/plan.txt"
+      - name: Comment the plan on the pull request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('plan.txt', 'utf8').slice(0, 60000);
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number, owner: context.repo.owner, repo: context.repo.repo,
+              body: "Terraform plan for dev:\n```\n" + plan + "\n```"
+            });
